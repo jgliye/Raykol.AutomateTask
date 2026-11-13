@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>1.0.0</Version>
+    <AssemblyTitle>睿科自动化任务通知</AssemblyTitle>
+    <Product>睿科自动化任务</Product>
+    <Company>Raykol</Company>
+    <ApplicationIcon>..\Raykol.AutomateTask\Assets\Raykol.ico</ApplicationIcon>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Raykol.AutomateTask\Models\TaskNotification.cs" Link="Models\TaskNotification.cs" />
+    <Compile Include="..\Raykol.AutomateTask\Utils\NotificationProtocol.cs" Link="Utils\NotificationProtocol.cs" />
+    <Compile Include="..\Raykol.AutomateTask\Utils\SerializeHelper.cs" Link="Utils\SerializeHelper.cs" />
+  </ItemGroup>
+</Project>
