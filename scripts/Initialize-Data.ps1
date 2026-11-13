@@ -32,18 +32,16 @@ $trayAcl = Get-Acl -LiteralPath $tray
 $trayAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($users,'ReadAndExecute',$inherit,$none,$allow))
 Set-Acl -LiteralPath $tray -AclObject $trayAcl
 
-foreach ($name in @('data','Logs')) {
-    $path = Join-Path $Root $name
-    [IO.Directory]::CreateDirectory($path) | Out-Null
-    $restricted = [Security.AccessControl.DirectorySecurity]::new()
-    $restricted.SetAccessRuleProtection($true,$false)
-    $restricted.SetOwner($admins)
-    foreach ($entry in @($admins,$system)) {
-        $restricted.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($entry,'FullControl',$inherit,$none,$allow))
-    }
-    $restricted.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($service,'Modify',$inherit,$none,$allow))
-    Set-Acl -LiteralPath $path -AclObject $restricted
+$path = Join-Path $Root 'Logs'
+[IO.Directory]::CreateDirectory($path) | Out-Null
+$restricted = [Security.AccessControl.DirectorySecurity]::new()
+$restricted.SetAccessRuleProtection($true,$false)
+$restricted.SetOwner($admins)
+foreach ($entry in @($admins,$system)) {
+    $restricted.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($entry,'FullControl',$inherit,$none,$allow))
 }
+$restricted.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($service,'Modify',$inherit,$none,$allow))
+Set-Acl -LiteralPath $path -AclObject $restricted
 $fileAcl = [Security.AccessControl.FileSecurity]::new()
 $fileAcl.SetAccessRuleProtection($true,$false)
 $fileAcl.SetOwner($admins)

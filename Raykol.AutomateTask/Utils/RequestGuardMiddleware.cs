@@ -1,13 +1,12 @@
 using System.ComponentModel.DataAnnotations;
 using System.Net;
-using Microsoft.AspNetCore.Antiforgery;
 
 namespace Raykol.AutomateTask.Utils;
 
 /// <summary>
-/// 限制本机入口，调用框架防伪验证并统一响应头与异常提示
+/// 限制本机入口并统一响应头与异常提示
 /// </summary>
-public sealed class RequestGuardMiddleware(RequestDelegate next, IAntiforgery antiforgery)
+public sealed class RequestGuardMiddleware(RequestDelegate next)
 {
     /// <summary>
     /// 对每个请求施加本机管理边界
@@ -32,18 +31,7 @@ public sealed class RequestGuardMiddleware(RequestDelegate next, IAntiforgery an
 
         try
         {
-            if (request.Path.StartsWithSegments("/api") &&
-                !HttpMethods.IsGet(request.Method) &&
-                !HttpMethods.IsHead(request.Method) &&
-                !HttpMethods.IsOptions(request.Method))
-                await antiforgery.ValidateRequestAsync(context);
-
             await next(context);
-        }
-        catch (AntiforgeryValidationException)
-        {
-            context.Response.StatusCode = StatusCodes.Status400BadRequest;
-            await context.Response.WriteAsJsonAsync(new { error = "页面验证已过期，请刷新页面后重试" });
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {

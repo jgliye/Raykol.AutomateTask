@@ -1,5 +1,3 @@
-let requestToken = '';
-
 /** 接口错误只携带受控提示和 HTTP 状态 */
 export class ApiError extends Error {
   constructor(message, status = 0) {
@@ -8,14 +6,9 @@ export class ApiError extends Error {
   }
 }
 
-/** 同源请求在修改操作中自动提交防伪令牌，不自动重试 */
+/** 向本机服务发送 JSON 请求，统一处理超时和错误，不自动重试 */
 export async function request(path, { method = 'GET', body } = {}) {
   const headers = { Accept: 'application/json' };
-
-  if (method !== 'GET') {
-    if (!requestToken) throw new ApiError('页面尚未完成连接，请刷新后重试');
-    headers['X-CSRF-TOKEN'] = requestToken;
-  }
 
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -27,7 +20,6 @@ export async function request(path, { method = 'GET', body } = {}) {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: 'same-origin',
       redirect: 'error',
       cache: 'no-store',
       signal: controller.signal,
@@ -48,11 +40,4 @@ export async function request(path, { method = 'GET', body } = {}) {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-/** 页面初始化时自动获取防伪令牌 */
-export async function session() {
-  const result = await request('session');
-  requestToken = result.requestToken;
-  return result;
 }

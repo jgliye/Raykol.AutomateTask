@@ -24,9 +24,7 @@ foreach ($name in @('Install-Service.ps1','Uninstall-Service.ps1','Initialize-Da
 }
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $output
 [IO.Directory]::CreateDirectory((Join-Path $output 'Logs')) | Out-Null
-[IO.Directory]::CreateDirectory((Join-Path $output 'data')) | Out-Null
-if ((Test-Path -LiteralPath (Join-Path $output 'AutomateTask.db')) -or
-    (Get-ChildItem -LiteralPath (Join-Path $output 'data') -Force).Count -ne 0) {
+if (Test-Path -LiteralPath (Join-Path $output 'AutomateTask.db')) {
     throw '分享包检查失败：包含个人配置或运行数据'
 }
 Compress-Archive -LiteralPath $output -DestinationPath ($output + '.zip')

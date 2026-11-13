@@ -1,5 +1,4 @@
 using FreeSql;
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
 using NLog.Config;
 using NLog.Extensions.Logging;
@@ -42,15 +41,6 @@ builder.Services.AddLogging(loggingBuilder =>
 builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
     options.InvalidModelStateResponseFactory = _ => new BadRequestObjectResult(
         new { error = "输入参数无效，请检查必填项和数字范围" }));
-builder.Services.AddAntiforgery(options =>
-{
-    options.HeaderName = "X-CSRF-TOKEN";
-    options.Cookie.Name = "Raykol.AutomateTask.Antiforgery";
-});
-builder.Services.AddDataProtection()
-    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(root, "data", "keys")))
-    .ProtectKeysWithDpapi(protectToLocalMachine: true);
-builder.Services.AddSingleton(new LogReader(root));
 builder.Services.AddSingleton<WorkHoursService>();
 builder.Services.AddSingleton<IWorkHoursService>(sp => sp.GetRequiredService<WorkHoursService>());
 builder.Services.AddSingleton<WorkHoursWorker>();

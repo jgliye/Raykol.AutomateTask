@@ -1,8 +1,6 @@
-using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Mvc;
 using Raykol.AutomateTask.Models;
 using Raykol.AutomateTask.Services;
-using Raykol.AutomateTask.Utils;
 
 namespace Raykol.AutomateTask.Controllers;
 
@@ -13,18 +11,8 @@ namespace Raykol.AutomateTask.Controllers;
 [Route("api/work-hours")]
 public sealed class WorkHoursController(
     WorkHoursService workHours, WorkHoursWorker worker,
-    IAntiforgery antiforgery,
-    LogReader logs, ILogger<WorkHoursController> log) : ControllerBase
+    ILogger<WorkHoursController> log) : ControllerBase
 {
-    /// <summary>
-    /// 获取页面写操作使用的防伪令牌，无需管理登录
-    /// </summary>
-    [HttpGet("session")]
-    public IActionResult Session() => Ok(new
-    {
-        requestToken = antiforgery.GetAndStoreTokens(HttpContext).RequestToken
-    });
-
     /// <summary>
     /// 读取当前配置、计划和执行状态
     /// </summary>
@@ -82,10 +70,10 @@ public sealed class WorkHoursController(
             log.LogInformation("CRM 登录及本人身份核对成功；会话已加密保存");
             return Ok(new { message = "CRM 登录及本人身份核对成功" });
         }
-        catch
+        catch (Exception ex)
         {
+            log.LogWarning("CRM 登录失败：{Reason}", WorkHoursService.GetErrorMessage(ex));
             workHours.Logout();
-            log.LogWarning("CRM 登录失败；未保留本次会话");
             throw;
         }
     }
@@ -107,22 +95,37 @@ public sealed class WorkHoursController(
     [HttpPost("preflight")]
     public async Task<IActionResult> Preflight(CancellationToken ct)
     {
-        var settings = workHours.ReadConfig();
-        var date = DateOnly.FromDateTime(DateTime.Today);
-        var scheduledDay = await workHours.ShouldRun(settings, date, ct);
-        var day = await workHours.Read(settings, date, ct);
+        var stage = "读取工时配置";
 
-        if (!day.HasRecords)
-            await workHours.Prepare(day, settings, date, ct);
+        try
+        {
+            var settings = workHours.ReadConfig();
+            var date = DateOnly.FromDateTime(DateTime.Today);
+            stage = "判断重复日期及工作日日历";
+            var scheduledDay = await workHours.ShouldRun(settings, date, ct);
+            stage = "核对本人身份及读取当天月表";
+            var day = await workHours.Read(settings, date, ct);
 
-        log.LogInformation("只读预检完成；未发送工时保存请求");
-        var result = day.HasRecords ? "当天已有记录，将整天跳过" : "表单与项目验证通过，未保存工时";
-        return Ok(new { message = $"日期：{date:yyyy-MM-dd}；账号：{day.Account}；符合重复规则：{(scheduledDay ? "是" : "否")}；{result}" });
+            if (!day.HasRecords)
+            {
+                stage = "校验每日填报表单";
+                await workHours.Prepare(day, settings, date, ct);
+            }
+
+            log.LogInformation("只读预检完成；未发送工时保存请求");
+            var result = day.HasRecords ? "当天已有记录，将整天跳过" : "表单与项目验证通过，未保存工时";
+            return Ok(new { message = $"日期：{date:yyyy-MM-dd}；账号：{day.Account}；符合重复规则：{(scheduledDay ? "是" : "否")}；{result}" });
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning("只读预检失败[{Stage}]：{Reason}", stage, WorkHoursService.GetErrorMessage(ex));
+            throw;
+        }
     }
 
     /// <summary>
     /// 按需读取最近日志，不建立服务端历史日志缓存
     /// </summary>
     [HttpGet("logs")]
-    public IActionResult Logs() => Ok(new { text = logs.Tail() });
+    public IActionResult Logs() => Ok(new { text = workHours.ReadLogs() });
 }

@@ -59,9 +59,9 @@ public sealed class WorkHoursWorker(
                 {
                     break;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    const string error = "配置、状态或日志文件异常，已停止本轮";
+                    var error = $"任务准备失败：{WorkHoursService.GetErrorMessage(ex)}；已停止本轮";
 
                     if (Status != error)
                     {
@@ -143,6 +143,7 @@ public sealed class WorkHoursWorker(
         using var roundDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         roundDeadline.CancelAfter(TimeSpan.FromSeconds(Math.Min(110, state.Plan.RetryIntervalSeconds - 1)));
         var requestToken = roundDeadline.Token;
+        var stage = "核实已尝试保存的结果";
 
         try
         {
@@ -152,12 +153,15 @@ public sealed class WorkHoursWorker(
                 return;
             }
 
+            stage = "判断重复日期及工作日日历";
+
             if (!await workHours.ShouldRun(state.Plan, date, requestToken))
             {
                 Finish(state, "跳过：不在所选重复日期");
                 return;
             }
 
+            stage = "核对本人身份及读取当天月表";
             var day = await workHours.Read(state.Plan, date, requestToken);
 
             if (day.HasRecords)
@@ -166,7 +170,9 @@ public sealed class WorkHoursWorker(
                 return;
             }
 
+            stage = "校验每日填报表单";
             var body = await workHours.Prepare(day, state.Plan, date, requestToken);
+            stage = "保存前复查本人身份及当天记录";
             var fresh = await workHours.Read(state.Plan, date, requestToken);
 
             if (fresh.HasRecords || fresh.PersonId != day.PersonId || fresh.Account != day.Account)
@@ -175,6 +181,7 @@ public sealed class WorkHoursWorker(
                 return;
             }
 
+            stage = "保存前校验配置及日期";
             requestToken.ThrowIfCancellationRequested();
             var latest = workHours.ReadConfig();
 
@@ -190,9 +197,12 @@ public sealed class WorkHoursWorker(
                 return;
             }
 
+            stage = "持久化保存意图";
             state = state with { PostAttempted = true, Result = "保存结果待核实，禁止再次 POST" };
             SaveState(state);
+            stage = "提交当天工时";
             await workHours.Save(day, body, date, requestToken);
+            stage = "核实保存结果";
             await Verify(state, requestToken);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -202,11 +212,12 @@ public sealed class WorkHoursWorker(
         catch (ValidationException ex) when (!state.PostAttempted)
         {
             // 配置、身份或日期校验失败不重试；已尝试保存时仍只读核实
-            Finish(state, "跳过：" + ex.Message);
+            Finish(state, $"跳过[{stage}]：{WorkHoursService.GetErrorMessage(ex)}");
         }
-        catch
+        catch (Exception ex)
         {
-            Retry(state, state.PostAttempted ? "保存结果不明，仅查询核实" : "网络、日历或协议检查失败");
+            var reason = $"失败阶段[{stage}]：{WorkHoursService.GetErrorMessage(ex)}";
+            Retry(state, state.PostAttempted ? "保存结果不明，仅查询核实；" + reason : reason);
         }
     }
 
@@ -222,7 +233,7 @@ public sealed class WorkHoursWorker(
         if (actual.Account == state.Plan.Account && actual.Projects.SequenceEqual(expected))
             Finish(state, $"成功：{state.Plan.GetTimeSlots().Length / 2.0:0.#} 小时，全部时间格及项目核对通过");
         else
-            Retry(state, "结果不明或记录不一致；只读核实，禁止重发");
+            Retry(state, "结果不明[核实保存结果]：时间格或项目不一致；只读核实，禁止重发");
     }
 
     /// <summary>

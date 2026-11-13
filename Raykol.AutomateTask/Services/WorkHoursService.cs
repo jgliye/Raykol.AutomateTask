@@ -13,7 +13,7 @@ using Raykol.AutomateTask.Utils;
 namespace Raykol.AutomateTask.Services;
 
 /// <summary>
-/// 集中处理工时请求、CRM 页面解析、会话和重复日期判断
+/// 集中处理工时请求、CRM 页面解析、会话、重复日期判断和日志读取
 /// </summary>
 public sealed class WorkHoursService : IWorkHoursService, IDisposable
 {
@@ -84,6 +84,68 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
     {
         config.GetTimeSlots();
         configs.Save(config);
+    }
+
+    /// <summary>
+    /// 返回用于日志的受控失败原因，不输出凭据、请求正文或原始异常
+    /// </summary>
+    public static string GetErrorMessage(Exception error) => error switch
+    {
+        ValidationException or InvalidDataException => error.Message,
+        HttpRequestException http when http.StatusCode is { } code => $"HTTP {(int)code}（{http.HttpRequestError}）",
+        HttpRequestException http => $"网络请求失败（{http.HttpRequestError}）",
+        OperationCanceledException => "请求已取消或执行超时",
+        TimeoutException => "操作超时",
+        JsonException => "响应或配置 JSON 格式错误",
+        CryptographicException => "CRM 会话解密失败，请重新登录",
+        UnauthorizedAccessException => "文件或数据库访问权限不足",
+        IOException => $"文件读写失败（{error.GetType().Name}）",
+        _ => $"程序异常（{error.GetType().Name}）"
+    };
+
+    /// <summary>
+    /// 从最近两个日志文件读取末尾 200 行，允许同时写入和清理
+    /// </summary>
+    public string ReadLogs()
+    {
+        var directory = new DirectoryInfo(Path.Combine(AppContext.BaseDirectory, "Logs"));
+
+        if (!directory.Exists)
+            return "暂无日志";
+
+        var files = directory.EnumerateFiles("*.log")
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .ThenByDescending(file => file.Name, StringComparer.Ordinal)
+            .Take(2)
+            .Reverse();
+        var lines = new Queue<string>(200);
+
+        foreach (var file in files)
+        {
+            FileStream stream;
+
+            try
+            {
+                stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            }
+            catch (FileNotFoundException)
+            {
+                // 文件可能刚被 NLog 保留策略清理，继续读取其他文件
+                continue;
+            }
+
+            using var reader = new StreamReader(stream);
+
+            while (reader.ReadLine() is { } line)
+            {
+                if (lines.Count == 200)
+                    lines.Dequeue();
+
+                lines.Enqueue(line);
+            }
+        }
+
+        return string.Join(Environment.NewLine, lines);
     }
 
     /// <summary>
@@ -342,7 +404,8 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
             "/oa/hour/edit", EditQuery(day.PersonId, date));
         var title = doc.SelectSingleNode("//title") is { } titleNode ? Text(titleNode) : "";
 
-        if (!Regex.IsMatch(title, $@"{date.Year}\D+0?{date.Month}\D+0?{date.Day}(?:\D|$)"))
+        // CRM 弹窗返回的表单片段没有 title，日期已通过本人月表按钮及编辑地址参数校验
+        if (title.Length > 0 && !Regex.IsMatch(title, $@"{date.Year}\D+0?{date.Month}\D+0?{date.Day}(?:\D|$)"))
             throw new InvalidDataException("CRM 每日表单标题日期不匹配");
 
         var times = form.Descendants().Where(n => Attribute(n, "name") == "hourtime[]").ToArray();

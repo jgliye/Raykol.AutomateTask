@@ -175,9 +175,7 @@
               </div>
               <div class="form-actions">
                 <AButton type="primary" html-type="submit" :loading="busy === 'save'">保存配置</AButton>
-                <AButton :disabled="!!busy" @click="perform('reset', () => refreshStatus(true))">
-                  恢复已保存配置
-                </AButton>
+                <AButton :disabled="!!busy" @click="perform('reset', () => refreshStatus(true))">重置配置</AButton>
                 <span v-if="hasChanges" class="draft-label">有未保存的修改</span>
               </div>
             </AForm>
@@ -254,7 +252,7 @@ import {
   Tag as ATag,
   TimePicker as ATimePicker,
 } from 'ant-design-vue';
-import { request, session } from '../api/work-hours.js';
+import { request } from '../api/work-hours.js';
 
 const AFormItem = AForm.Item;
 const AInputPassword = AInput.Password;
@@ -389,10 +387,7 @@ async function refreshLogs() {
 }
 
 onMounted(async () => {
-  await perform('initialize', async () => {
-    await session();
-    await refreshStatus(true);
-  });
+  await perform('initialize', () => refreshStatus(true));
   initializing.value = false;
 });
 </script>
