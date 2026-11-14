@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Unicode;
@@ -51,6 +52,37 @@ namespace Raykol.AutomateTask.Services
         }
 
         /// <summary>
+        /// 按分类读取配置对象，以创建顺序生成任务列表
+        /// </summary>
+        public List<T> GetList(BaseConfigType type = BaseConfigType.Default) =>
+            [.. Orm.Select<BaseConfigEntry>().Where(entry => entry.Type == type).OrderBy(entry => entry.Id).ToList()
+                   .Select(entry => Deserialize(entry) ?? throw new InvalidDataException("配置内容为空"))];
+
+        /// <summary>
+        /// 串行合并最新配置，回调只修改本次操作负责的字段
+        /// </summary>
+        public T UpdateByKey(string key, Func<T, T> update, BaseConfigType type = BaseConfigType.Default)
+        {
+            ArgumentNullException.ThrowIfNull(update);
+            BaseConfigLock.Semaphore.Wait();
+
+            try
+            {
+                var entry = Orm.Select<BaseConfigEntry>().Where(item => item.Key == key && item.Type == type).First()
+                    ?? throw new InvalidDataException("配置不存在，请刷新任务列表");
+                var current = Deserialize(entry) ?? throw new InvalidDataException("配置内容为空");
+                var updated = update(current);
+                ArgumentNullException.ThrowIfNull(updated);
+                SaveEntry(entry, updated);
+                return updated;
+            }
+            finally
+            {
+                BaseConfigLock.Semaphore.Release();
+            }
+        }
+
+        /// <summary>
         /// 串行保存当前类型对象，返回前已提交数据库
         /// </summary>
         public void Save(T content, BaseConfigType type = BaseConfigType.Default)
@@ -68,14 +100,22 @@ namespace Raykol.AutomateTask.Services
             {
                 var entry = Orm.Select<BaseConfigEntry>().Where(item => item.Key == key && item.Type == type).First()
                     ?? new BaseConfigEntry { Key = key, Type = type };
-                entry.Content = SerializeHelper.Serialize(content, jsonOptions);
-                entry.UpdateTime = DateTime.Now;
-                Orm.InsertOrUpdate<BaseConfigEntry>().SetSource(entry).ExecuteAffrows();
+                SaveEntry(entry, content);
             }
             finally
             {
                 BaseConfigLock.Semaphore.Release();
             }
+        }
+
+        /// <summary>
+        /// 写入完整内容，调用方已取得通用写入锁
+        /// </summary>
+        private void SaveEntry(BaseConfigEntry entry, T content)
+        {
+            entry.Content = SerializeHelper.Serialize(content, jsonOptions);
+            entry.UpdateTime = DateTime.Now;
+            Orm.InsertOrUpdate<BaseConfigEntry>().SetSource(entry).ExecuteAffrows();
         }
 
         /// <summary>

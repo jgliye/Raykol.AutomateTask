@@ -1,6 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using System.Globalization;
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace Raykol.AutomateTask.Models;
@@ -8,17 +6,12 @@ namespace Raykol.AutomateTask.Models;
 /// <summary>
 /// 工时任务配置，整体映射到通用配置服务
 /// </summary>
-public sealed record WorkHoursConfig
+public sealed record WorkHoursConfig : TaskSchedule
 {
     /// <summary>
     /// CRM 完整半小时时间标签，配置和解析共用
     /// </summary>
     public static readonly string[] TimeLabels = [.. Enumerable.Range(0, 27).Select(i => TimeOnly.FromTimeSpan(TimeSpan.FromMinutes(510 + i * 30)).ToString("HH:mm"))];
-
-    /// <summary>
-    /// 是否自动填报，首次发布默认关闭
-    /// </summary>
-    public bool Enabled { get; init; }
 
     /// <summary>
     /// CRM HTTPS 站点根地址，可包含端口，不包含业务路径
@@ -34,21 +27,6 @@ public sealed record WorkHoursConfig
     /// 填报项目号
     /// </summary>
     public string Project { get; init; } = "RRD068-W26977";
-
-    /// <summary>
-    /// 本机时间每日执行时刻
-    /// </summary>
-    public string RunAt { get; init; } = "19:00";
-
-    /// <summary>
-    /// 重复方式：Weekly 自选星期，Workdays 中国法定工作日
-    /// </summary>
-    public string RepeatMode { get; init; } = "Workdays";
-
-    /// <summary>
-    /// 自选星期，1 为周一，7 为周日
-    /// </summary>
-    public int[] WeekDays { get; init; } = [1, 2, 3, 4, 5];
 
     /// <summary>
     /// 上午首格
@@ -76,46 +54,16 @@ public sealed record WorkHoursConfig
     public bool IncludeEnd { get; init; } = true;
 
     /// <summary>
-    /// 单个网络请求超时秒数
-    /// </summary>
-    public int TimeoutSeconds { get; init; } = 20;
-
-    /// <summary>
-    /// 失败后各轮开始时间的间隔秒数
-    /// </summary>
-    public int RetryIntervalSeconds { get; init; } = 120;
-
-    /// <summary>
-    /// 首次执行失败后允许的重试次数，0 表示不重试
-    /// </summary>
-    public int MaxRetries { get; init; } = 5;
-
-    /// <summary>
-    /// 首轮和重试合计的最大执行轮数
-    /// </summary>
-    [JsonIgnore]
-    public int MaxAttempts => MaxRetries + 1;
-
-    /// <summary>
     /// 校验配置并返回全部工作格
     /// </summary>
     public string[] GetTimeSlots()
     {
         GetCrmOrigin();
-
-        if (RepeatMode is not ("Weekly" or "Workdays") || WeekDays == null ||
-            WeekDays.Any(d => d is < 1 or > 7) || WeekDays.Distinct().Count() != WeekDays.Length ||
-            (RepeatMode == "Weekly" && WeekDays.Length == 0))
-            throw new ValidationException("请选择有效重复方式，自选星期至少勾选一天（周一至周日）");
+        ValidateSchedule();
 
         if (!Regex.IsMatch(Project ?? "", @"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$") ||
             !(Account == "" || IsValidAccount(Account)))
             throw new ValidationException("项目号或员工账号无效");
-
-        if (!TimeOnly.TryParseExact(RunAt, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out _) ||
-            TimeoutSeconds is < 5 or > 90 ||
-            RetryIntervalSeconds is < 10 or > 86400 || MaxRetries is < 0 or > 20)
-            throw new ValidationException("执行时间、超时或重试参数无效（重试间隔 10–86400 秒，次数 0–20）");
 
         var endpoints = new[] { MorningStart, MorningEnd, AfternoonStart, AfternoonEnd };
 

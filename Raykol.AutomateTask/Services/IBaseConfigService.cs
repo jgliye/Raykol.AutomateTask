@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Raykol.AutomateTask.Enums;
@@ -19,6 +20,16 @@ namespace Raykol.AutomateTask.Services
         /// 同步读取指定键，供现有调度和启动流程使用
         /// </summary>
         T? GetByKey(string key = "", BaseConfigType type = BaseConfigType.Default);
+
+        /// <summary>
+        /// 按分类读取完整配置列表
+        /// </summary>
+        List<T> GetList(BaseConfigType type = BaseConfigType.Default);
+
+        /// <summary>
+        /// 在同一次写入锁内读取最新配置并更新，防止部分字段相互覆盖
+        /// </summary>
+        T UpdateByKey(string key, Func<T, T> update, BaseConfigType type = BaseConfigType.Default);
 
         /// <summary>
         /// 同步保存当前类型配置，返回前完成持久化

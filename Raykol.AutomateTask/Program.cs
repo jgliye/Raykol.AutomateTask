@@ -13,7 +13,7 @@ using var instanceMutex = new Mutex(false, @"Global\Raykol.AutomateTask", out va
 
 if (!firstInstance)
 {
-    Console.WriteLine("睿科自动化任务已在运行，当前进程退出");
+    Console.WriteLine("自动化任务已在运行，当前进程退出");
     return;
 }
 
@@ -39,12 +39,10 @@ builder.Services.AddLogging(loggingBuilder =>
     loggingBuilder.AddNLog(configuration);
 });
 builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
-    options.InvalidModelStateResponseFactory = _ => new BadRequestObjectResult(
-        new { error = "输入参数无效，请检查必填项和数字范围" }));
-builder.Services.AddSingleton<WorkHoursService>();
-builder.Services.AddSingleton<IWorkHoursService>(sp => sp.GetRequiredService<WorkHoursService>());
-builder.Services.AddSingleton<WorkHoursWorker>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkHoursWorker>());
+    options.InvalidModelStateResponseFactory = _ =>
+        new BadRequestObjectResult(new { error = "输入参数无效，请检查必填项和数字范围" }));
+builder.Services.AddSingleton<ITaskService, TaskService>();
+builder.Services.AddHostedService<AutomationWorker>();
 builder.Services.AddHostedService<NotificationService>();
 
 await using var app = builder.Build();

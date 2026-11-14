@@ -19,7 +19,7 @@ internal static class Program
 
         if (!File.Exists(Path.Combine(root, "appsettings.json")))
         {
-            MessageBox.Show("请从发布包 Tray 目录启动，或传入服务程序所在目录", "睿科自动化任务");
+            MessageBox.Show("请从发布包 Tray 目录启动，或传入服务程序所在目录", "自动化任务");
             return;
         }
 

@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -7,83 +6,79 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using HtmlAgilityPack;
 using Microsoft.AspNetCore.WebUtilities;
+using Raykol.AutomateTask.Enums;
 using Raykol.AutomateTask.Models;
 using Raykol.AutomateTask.Utils;
 
 namespace Raykol.AutomateTask.Services;
 
 /// <summary>
-/// 集中处理工时请求、CRM 页面解析、会话、重复日期判断和日志读取
+/// 处理单个工时任务的 CRM 请求解析和独立会话
 /// </summary>
 public sealed class WorkHoursService : IWorkHoursService, IDisposable
 {
     private static readonly string[] AllowedPaths = ["/login", "/index", "/oa/hour/", "/oa/hour/desc", "/oa/hour/edit"];
     private readonly CookieContainer cookies = new();
     private readonly HttpClient http;
-    private readonly IBaseConfigService<WorkHoursConfig> configs;
-    private readonly IBaseConfigService<string> sessions;
-    private readonly HttpClient calendar;
+    private readonly IBaseConfigService<TaskConfig> taskConfigService;
+    private readonly string key;
     private Uri? activeOrigin;
     private string? pendingSession;
 
     /// <summary>
-    /// 创建独立的 CRM 与日历连接，禁用自动重定向和日历 Cookie
+    /// 最近一次实际 CRM 身份检查结果
     /// </summary>
-    public WorkHoursService(IBaseConfigService<WorkHoursConfig> configs, IBaseConfigService<string> sessions,
-        HttpMessageHandler? transport = null, HttpMessageHandler? calendarTransport = null)
+    public CrmSessionStatus Crm { get; private set; } = new CrmSessionStatus
     {
-        this.configs = configs;
-        this.sessions = sessions;
-        var handler = transport ?? new HttpClientHandler
+        State = "Unknown",
+        Message = "尚未检查",
+        CheckedAt = null
+    };
+
+    /// <summary>
+    /// 每项任务使用独立连接，配置和会话来自同一条任务记录
+    /// </summary>
+    public WorkHoursService(IBaseConfigService<TaskConfig> taskConfigService, string id)
+    {
+        this.taskConfigService = taskConfigService;
+        key = id;
+        pendingSession = ReadTask().CrmSession;
+        http = new HttpClient(new HttpClientHandler
         {
             AllowAutoRedirect = false,
             CookieContainer = cookies,
             UseCookies = true
-        };
-
-        http = new HttpClient(handler)
-        {
-            Timeout = Timeout.InfiniteTimeSpan,
-            MaxResponseContentBufferSize = 4 * 1024 * 1024
-        };
-        calendar = new HttpClient(calendarTransport ?? new HttpClientHandler
-        {
-            AllowAutoRedirect = false,
-            UseCookies = false
         })
         {
             Timeout = Timeout.InfiniteTimeSpan,
             MaxResponseContentBufferSize = 4 * 1024 * 1024
         };
-        var encrypted = sessions.GetByKey("WorkHoursSession");
-        pendingSession = encrypted == null ? null : Encoding.UTF8.GetString(ProtectedData.Unprotect(
-            Convert.FromBase64String(encrypted), null, DataProtectionScope.LocalMachine));
-    }
-
-    /// <summary>
-    /// 通过通用配置服务读取工时配置，首次缺失时使用模型默认值初始化
-    /// </summary>
-    public WorkHoursConfig ReadConfig()
-    {
-        var config = configs.GetByKey();
-
-        if (config == null)
+        Crm = new CrmSessionStatus
         {
-            config = new WorkHoursConfig();
-            SaveConfig(config);
-        }
-
-        config.GetTimeSlots();
-        return config;
+            State = pendingSession == null ? "LoggedOut" : "Unknown",
+            Message = pendingSession == null ? "未登录" : "待检查",
+            CheckedAt = null
+        };
     }
 
     /// <summary>
-    /// 验证后整体保存工时配置，不改写 appsettings 文件
+    /// 从当前任务记录中读取工时配置，不另存一份默认配置
     /// </summary>
-    public void SaveConfig(WorkHoursConfig config)
+    public WorkHoursConfig ReadConfig() => (WorkHoursConfig)ReadTask().Settings;
+
+    /// <summary>
+    /// 读取并校验所属任务，禁止将其他类型配置用于 CRM
+    /// </summary>
+    private TaskConfig ReadTask()
     {
-        config.GetTimeSlots();
-        configs.Save(config);
+        var task = taskConfigService.GetByKey(key, BaseConfigType.ExecutionConfig)
+            ?? throw new InvalidDataException("任务不存在，请刷新列表");
+        task.Validate();
+
+        if (task.Id != key || task.Type != TaskType.WorkHours)
+            throw new InvalidDataException("CRM 会话所属任务无效");
+
+        return task;
     }
 
     /// <summary>
@@ -102,51 +97,6 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
         IOException => $"文件读写失败（{error.GetType().Name}）",
         _ => $"程序异常（{error.GetType().Name}）"
     };
-
-    /// <summary>
-    /// 从最近两个日志文件读取末尾 200 行，允许同时写入和清理
-    /// </summary>
-    public string ReadLogs()
-    {
-        var directory = new DirectoryInfo(Path.Combine(AppContext.BaseDirectory, "Logs"));
-
-        if (!directory.Exists)
-            return "暂无日志";
-
-        var files = directory.EnumerateFiles("*.log")
-            .OrderByDescending(file => file.LastWriteTimeUtc)
-            .ThenByDescending(file => file.Name, StringComparer.Ordinal)
-            .Take(2)
-            .Reverse();
-        var lines = new Queue<string>(200);
-
-        foreach (var file in files)
-        {
-            FileStream stream;
-
-            try
-            {
-                stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            }
-            catch (FileNotFoundException)
-            {
-                // 文件可能刚被 NLog 保留策略清理，继续读取其他文件
-                continue;
-            }
-
-            using var reader = new StreamReader(stream);
-
-            while (reader.ReadLine() is { } line)
-            {
-                if (lines.Count == 200)
-                    lines.Dequeue();
-
-                lines.Enqueue(line);
-            }
-        }
-
-        return string.Join(Environment.NewLine, lines);
-    }
 
     /// <summary>
     /// 切换源站时清空 Cookie，只恢复与完整源站匹配的加密会话
@@ -169,7 +119,8 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
             return;
 
         pendingSession = null;
-        var session = SerializeHelper.Deserialize<StoredSession>(stored);
+        var json = Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(stored), null, DataProtectionScope.LocalMachine));
+        var session = SerializeHelper.Deserialize<StoredSession>(json);
 
         if (session == null || !Uri.TryCreate(session.Origin, UriKind.Absolute, out var savedOrigin) || savedOrigin != origin)
             return;
@@ -225,7 +176,15 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
                 return "";
 
             if (target.AbsolutePath == "/login")
+            {
+                Crm = new CrmSessionStatus
+                {
+                    State = "Expired",
+                    Message = "登录已失效，请重新登录",
+                    CheckedAt = DateTimeOffset.Now
+                };
                 throw new ValidationException("CRM 登录已过期");
+            }
 
             throw new InvalidDataException("CRM 返回未预期重定向");
         }
@@ -234,6 +193,56 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
             throw new InvalidDataException($"CRM 返回 HTTP {(int)response.StatusCode}");
 
         return await response.Content.ReadAsStringAsync(deadline.Token);
+    }
+
+    /// <summary>
+    /// 实际核对 CRM 登录身份，连接失败不视为会话失效
+    /// </summary>
+    public async Task<CrmSessionStatus> CheckSession(CancellationToken ct)
+    {
+        var config = ReadConfig();
+
+        if (config.Account == "" || ReadTask().CrmSession == null)
+            return Crm = new CrmSessionStatus
+            {
+                State = "LoggedOut",
+                Message = "未登录",
+                CheckedAt = DateTimeOffset.Now
+            };
+
+        try
+        {
+            SelectOrigin(config.GetCrmOrigin());
+            CheckIdentity(await Request("/index", config.TimeoutSeconds, ct), config.Account);
+            return Crm = new CrmSessionStatus
+            {
+                State = "LoggedIn",
+                Message = "已登录",
+                CheckedAt = DateTimeOffset.Now
+            };
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ValidationException)
+        {
+            return Crm = new CrmSessionStatus
+            {
+                State = "Expired",
+                Message = "登录已失效，请重新登录",
+                CheckedAt = DateTimeOffset.Now
+            };
+        }
+        catch (Exception ex)
+        {
+            return Crm = new CrmSessionStatus
+            {
+                State = "Unavailable",
+                Message = GetErrorMessage(ex),
+                CheckedAt = DateTimeOffset.Now
+            };
+        }
     }
 
     /// <summary>
@@ -263,9 +272,14 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
 
         Target(origin, Attribute(forms[0], "action") is { Length: > 0 } action ? action : "/login", "/login", []);
         await Request("/login", config.TimeoutSeconds, ct, [new("username", username), new("password", password)]);
-        var (_, account) = Identity(await Request("/index", config.TimeoutSeconds, ct), username);
-        Persist();
+        var (_, account) = CheckIdentity(await Request("/index", config.TimeoutSeconds, ct), username);
 
+        Crm = new CrmSessionStatus
+        {
+            State = "LoggedIn",
+            Message = "已登录",
+            CheckedAt = DateTimeOffset.Now
+        };
         return account;
     }
 
@@ -279,7 +293,13 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
 
         var origin = config.GetCrmOrigin();
         SelectOrigin(origin);
-        var (name, account) = Identity(await Request("/index", config.TimeoutSeconds, ct), config.Account);
+        var (name, account) = CheckIdentity(await Request("/index", config.TimeoutSeconds, ct), config.Account);
+        Crm = new CrmSessionStatus
+        {
+            State = "LoggedIn",
+            Message = "已登录",
+            CheckedAt = DateTimeOffset.Now
+        };
         var list = Parse(await Request("/oa/hour/", config.TimeoutSeconds, ct));
         var candidates = new List<string>();
 
@@ -371,7 +391,14 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
 
         Target(origin, links[0].Groups[1].Value, "/oa/hour/edit", EditQuery(id, date));
 
-        return new(account, id, path, [.. projects]) { CrmOrigin = origin };
+        return new TimesheetDay
+        {
+            Account = account,
+            PersonId = id,
+            EditPath = path,
+            Projects = [.. projects],
+            CrmOrigin = origin
+        };
     }
 
     /// <summary>
@@ -478,7 +505,13 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
             cookie.Expired = true;
         }
 
-        sessions.DeleteByKey("WorkHoursSession");
+        taskConfigService.UpdateByKey(key, current => current with { CrmSession = null }, BaseConfigType.ExecutionConfig);
+        Crm = new CrmSessionStatus
+        {
+            State = "LoggedOut",
+            Message = "未登录",
+            CheckedAt = DateTimeOffset.Now
+        };
     }
 
     /// <summary>
@@ -486,12 +519,23 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
     /// </summary>
     private void Persist()
     {
-        var json = SerializeHelper.Serialize(new StoredSession(activeOrigin!.AbsoluteUri,
-            [.. cookies.GetAllCookies().Cast<Cookie>()
+        var json = SerializeHelper.Serialize(new StoredSession
+        {
+            Origin = activeOrigin!.AbsoluteUri,
+            Cookies = [.. cookies.GetAllCookies().Cast<Cookie>()
                 .Where(c => !c.Expired && string.Equals(c.Domain.TrimStart('.'), activeOrigin.Host, StringComparison.OrdinalIgnoreCase))
-                .Select(c => new StoredCookie(c.Name, c.Value, c.Domain, c.Path, c.Expires))]));
+                .Select(c => new StoredCookie
+                {
+                    Name = c.Name,
+                    Value = c.Value,
+                    Domain = c.Domain,
+                    Path = c.Path,
+                    Expires = c.Expires
+                })]
+        });
         var encrypted = ProtectedData.Protect(Encoding.UTF8.GetBytes(json), null, DataProtectionScope.LocalMachine);
-        sessions.SaveByKey("WorkHoursSession", Convert.ToBase64String(encrypted));
+        var session = Convert.ToBase64String(encrypted);
+        taskConfigService.UpdateByKey(key, current => current with { CrmSession = session }, BaseConfigType.ExecutionConfig);
     }
 
     /// <summary>
@@ -500,91 +544,6 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
     public void Dispose()
     {
         http.Dispose();
-        calendar.Dispose();
-    }
-
-    /// <summary>
-    /// 判断重复日期，仅工作日模式请求并交叉核对年度与每日节假日历
-    /// </summary>
-    public async Task<bool> ShouldRun(WorkHoursConfig config, DateOnly date, CancellationToken ct)
-    {
-        ct.ThrowIfCancellationRequested();
-
-        if (config.RepeatMode == "Weekly")
-            return config.WeekDays.Contains(WeekDay(date));
-
-        if (config.RepeatMode != "Workdays")
-            throw new InvalidDataException("重复方式无效");
-
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(TimeSpan.FromSeconds(config.TimeoutSeconds));
-        using var annualDocument = JsonDocument.Parse(await calendar.GetStringAsync(
-            $"https://timor.tech/api/holiday/year/{date.Year}/", deadline.Token));
-        using var dailyDocument = JsonDocument.Parse(await calendar.GetStringAsync(
-            $"https://timor.tech/api/holiday/info/{date:yyyy-MM-dd}", deadline.Token));
-        var annual = annualDocument.RootElement;
-        var daily = dailyDocument.RootElement;
-
-        try
-        {
-            var holidays = annual.GetProperty("holiday");
-            var entries = holidays.EnumerateObject().ToArray();
-
-            if (annual.GetProperty("code").GetInt32() != 0 || entries.Length < 10 ||
-                holidays.GetProperty("01-01").GetProperty("date").GetString() != $"{date.Year}-01-01" ||
-                holidays.GetProperty("10-01").GetProperty("date").GetString() != $"{date.Year}-10-01" ||
-                entries.Any(e => !DateOnly.TryParseExact(e.Value.GetProperty("date").GetString(), "yyyy-MM-dd", out var d) ||
-                    d.Year != date.Year || e.Name != d.ToString("MM-dd") ||
-                    e.Value.GetProperty("holiday").ValueKind is not (JsonValueKind.True or JsonValueKind.False)))
-                throw new InvalidDataException("年度节假日历不完整");
-
-            var weekday = date.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)date.DayOfWeek;
-            var hasException = holidays.TryGetProperty(date.ToString("MM-dd"), out var exception);
-            var expected = hasException ? (exception.GetProperty("holiday").GetBoolean() ? 2 : 3) : (weekday > 5 ? 1 : 0);
-            var type = daily.GetProperty("type");
-
-            if (daily.GetProperty("code").GetInt32() != 0 || type.GetProperty("type").GetInt32() != expected ||
-                type.GetProperty("week").GetInt32() != weekday ||
-                (hasException && daily.GetProperty("holiday").GetProperty("holiday").GetBoolean() != exception.GetProperty("holiday").GetBoolean()))
-                throw new InvalidDataException("年度和每日节假日历不一致");
-
-            return expected is 0 or 3;
-        }
-        catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException or FormatException)
-        {
-            throw new InvalidDataException("节假日历接口数据格式异常");
-        }
-    }
-
-    /// <summary>
-    /// 转换为配置使用的周一至周日编号
-    /// </summary>
-    public static int WeekDay(DateOnly date) => date.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)date.DayOfWeek;
-
-    /// <summary>
-    /// 按系统本地时区计算某日的计划时刻
-    /// </summary>
-    public static DateTimeOffset Due(DateOnly date, string time) =>
-        new(date.ToDateTime(TimeOnly.ParseExact(time, "HH:mm", CultureInfo.InvariantCulture), DateTimeKind.Local));
-
-    /// <summary>
-    /// 计算下一次首轮时刻，不补跑错过的任务
-    /// </summary>
-    public static DateTimeOffset Next(DateTimeOffset now, WorkHoursConfig config)
-    {
-        var date = DateOnly.FromDateTime(now.LocalDateTime);
-        config.GetTimeSlots();
-
-        for (var offset = 0; offset <= 7; offset++)
-        {
-            var candidate = date.AddDays(offset);
-            var due = Due(candidate, config.RunAt);
-
-            if (due > now && (config.RepeatMode == "Workdays" || config.WeekDays.Contains(WeekDay(candidate))))
-                return due;
-        }
-
-        throw new InvalidDataException("没有可执行的重复日期");
     }
 
     /// <summary>
@@ -603,6 +562,34 @@ public sealed class WorkHoursService : IWorkHoursService, IDisposable
             throw new ValidationException("CRM 当前账号与绑定账号不符");
 
         return (match.Groups[1].Value.Trim(), match.Groups[2].Value);
+    }
+
+    /// <summary>
+    /// 后台读取也同步会话状态，HTTP 200 的登录页同样视为失效
+    /// </summary>
+    private (string Name, string Account) CheckIdentity(string html, string expected)
+    {
+        try
+        {
+            var identity = Identity(html, expected);
+            Crm = new CrmSessionStatus
+            {
+                State = "LoggedIn",
+                Message = "已登录",
+                CheckedAt = DateTimeOffset.Now
+            };
+            return identity;
+        }
+        catch (ValidationException)
+        {
+            Crm = new CrmSessionStatus
+            {
+                State = "Expired",
+                Message = "登录已失效或身份不符，请重新登录",
+                CheckedAt = DateTimeOffset.Now
+            };
+            throw;
+        }
     }
 
     /// <summary>

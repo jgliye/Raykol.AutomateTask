@@ -16,7 +16,7 @@ export async function request(path, { method = 'GET', body } = {}) {
   const timeout = setTimeout(() => controller.abort(), 180000);
 
   try {
-    const response = await fetch(`/api/work-hours/${path}`, {
+    const response = await fetch(`/api/tasks${path ? '/' + path : ''}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),

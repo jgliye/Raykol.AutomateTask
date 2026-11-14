@@ -1,7 +1,6 @@
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
-using System.Text;
 using System.Text.Json;
 using Raykol.AutomateTask.Models;
 using Raykol.AutomateTask.Utils;
@@ -11,7 +10,7 @@ namespace Raykol.AutomateTask.Services;
 /// <summary>
 /// 通过本机管道提供当天终态，托盘无权读取配置或触发业务
 /// </summary>
-public sealed class NotificationService(WorkHoursWorker worker, ILogger<NotificationService> log)
+public sealed class NotificationService(ITaskService taskService, ILogger<NotificationService> log)
     : BackgroundService
 {
     /// <summary>
@@ -34,29 +33,31 @@ public sealed class NotificationService(WorkHoursWorker worker, ILogger<Notifica
 
                     try
                     {
-                        var date = DateOnly.FromDateTime(DateTime.Today);
-                        var state = worker.ReadState(date);
-                        TaskNotification? notification = null;
-
-                        if (state?.Complete == true && (state.Result.StartsWith("成功", StringComparison.Ordinal)
-                            || state.Result.StartsWith("失败", StringComparison.Ordinal)
-                            || state.Result.StartsWith("结果不明", StringComparison.Ordinal)))
-                            notification = new(date, state.Result.StartsWith("成功", StringComparison.Ordinal));
-
-                        // 管道使用单行帧，显式采用紧凑格式，避免全局缩进插入换行
-                        var bytes = Encoding.UTF8.GetBytes(SerializeHelper.Serialize(notification, JsonSerializerOptions.Web));
                         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                         deadline.CancelAfter(TimeSpan.FromSeconds(3));
-                        await pipe.WriteAsync(bytes, deadline.Token);
-                        await pipe.WriteAsync("\n"u8.ToArray(), deadline.Token);
+                        var receipts = await NotificationProtocol.Read<HashSet<string>>(pipe, deadline.Token);
+
+                        if (receipts == null || receipts.Count > 512 || receipts.Any(id => string.IsNullOrEmpty(id) || id.Length > 150))
+                            throw new InvalidDataException("通知回执无效");
+
+                        var notification = taskService.GetNotification(receipts);
+                        await NotificationProtocol.Write(pipe, notification, deadline.Token);
                         // 客户端读完再断开，避免 Disconnect 丢弃仍在管道缓冲区中的数据
                         var receipt = new byte[1];
                         await pipe.ReadExactlyAsync(receipt, deadline.Token);
+
+                        if (receipt[0] == 1 && notification != null)
+                            taskService.Acknowledge(notification);
+
                         lastError = null;
                     }
                     catch (IOException)
                     {
                         // 托盘退出导致断线，不影响已持久化的任务结果
+                    }
+                    catch (JsonException)
+                    {
+                        // 无效客户端帧不影响后续托盘连接
                     }
                     catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
                     {

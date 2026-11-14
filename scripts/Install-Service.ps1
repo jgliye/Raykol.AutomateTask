@@ -7,7 +7,7 @@ if (!(Test-Path -LiteralPath $tray)) { throw '发布包缺少托盘程序' }
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw '请右键安装服务.cmd，以管理员身份运行' }
 if (Get-Service -Name 'Raykol.AutomateTask' -ErrorAction SilentlyContinue) { throw '服务已存在，请先检查现有服务，不覆盖安装' }
-& sc.exe create Raykol.AutomateTask binPath= ('"' + $exe + '"') start= auto obj= 'NT SERVICE\Raykol.AutomateTask' DisplayName= '睿科自动化任务'
+& sc.exe create Raykol.AutomateTask binPath= ('"' + $exe + '"') start= auto obj= 'NT SERVICE\Raykol.AutomateTask' DisplayName= '自动化任务'
 if ($LASTEXITCODE -ne 0) { throw '注册服务失败' }
 & sc.exe sidtype Raykol.AutomateTask unrestricted
 if ($LASTEXITCODE -ne 0) { throw '服务 SID 设置失败；未启动服务' }

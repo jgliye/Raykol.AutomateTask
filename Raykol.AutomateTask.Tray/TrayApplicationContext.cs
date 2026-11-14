@@ -21,7 +21,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ContextMenuStrip menu = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 10000 };
     private readonly CancellationTokenSource stopping = new();
-    private string? lastReceipt;
+    private readonly HashSet<string> receipts = [];
+    private DateOnly receiptDate = DateOnly.FromDateTime(DateTime.Today);
     private bool fetching;
 
     /// <summary>
@@ -33,7 +34,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         receiptPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Raykol.AutomateTask", NotificationProtocol.PipeName(root) + ".txt");
         image = Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (Icon)SystemIcons.Application.Clone();
-        icon = new NotifyIcon { Icon = image, Text = "睿科自动化任务：等待服务", ContextMenuStrip = menu, Visible = true };
+        icon = new NotifyIcon { Icon = image, Text = "自动化任务：等待服务", ContextMenuStrip = menu, Visible = true };
         menu.Items.Add("打开管理页面", null, OpenManagement);
         menu.Items.Add("退出提醒（后台任务继续）", null, (_, _) => ExitThread());
         icon.DoubleClick += OpenManagement;
@@ -41,15 +42,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         try
         {
-            lastReceipt = File.Exists(receiptPath) ? File.ReadAllText(receiptPath) : null;
+            if (File.Exists(receiptPath) && new FileInfo(receiptPath).Length < NotificationProtocol.MaxMessageBytes)
+            {
+                var lines = File.ReadAllLines(receiptPath);
+
+                if (lines.FirstOrDefault() == receiptDate.ToString("yyyy-MM-dd"))
+                    receipts.UnionWith(lines.Skip(1).Where(id => id.Length is > 0 and <= 150).Take(512));
+            }
         }
         catch (IOException)
         {
-            icon.Text = "睿科自动化任务：通知回执不可读";
+            icon.Text = "自动化任务：通知回执不可读";
         }
         catch (UnauthorizedAccessException)
         {
-            icon.Text = "睿科自动化任务：通知回执无读取权限";
+            icon.Text = "自动化任务：通知回执无读取权限";
         }
 
         timer.Start();
@@ -74,56 +81,51 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 PipeAccessRights.ReadWrite, PipeOptions.Asynchronous,
                 TokenImpersonationLevel.Anonymous, HandleInheritability.None);
             await pipe.ConnectAsync(deadline.Token);
-            var buffer = new byte[NotificationProtocol.MaxMessageBytes];
-            var length = 0;
+            var today = DateOnly.FromDateTime(DateTime.Today);
 
-            while (length < buffer.Length)
+            if (receiptDate != today)
             {
-                var count = await pipe.ReadAsync(buffer.AsMemory(length), deadline.Token);
-
-                if (count == 0)
-                    break;
-
-                length += count;
-
-                if (buffer[length - 1] == (byte)'\n')
-                    break;
+                receiptDate = today;
+                receipts.Clear();
             }
+
+            await NotificationProtocol.Write(pipe, receipts, deadline.Token);
+            var notification = await NotificationProtocol.Read<TaskNotification>(pipe, deadline.Token);
 
             if (stopping.IsCancellationRequested)
                 return;
 
-            if (length == 0 || length == buffer.Length || buffer[length - 1] != (byte)'\n')
-                throw new InvalidDataException("通知格式无效");
-
-            await pipe.WriteAsync(new byte[] { 1 }, deadline.Token);
-            var notification = SerializeHelper.Deserialize<TaskNotification>(buffer.AsSpan(0, length));
-            icon.Text = "睿科自动化任务：已连接服务";
+            icon.Text = "自动化任务：已连接服务";
 
             if (notification == null)
+            {
+                await pipe.WriteAsync(new byte[] { 1 }, deadline.Token);
                 return;
+            }
 
-            if (notification.Date != DateOnly.FromDateTime(DateTime.Today))
-                throw new InvalidDataException("仅接受当天通知");
+            if (notification.Date != today || string.IsNullOrWhiteSpace(notification.Id) || notification.Id.Length > 150 ||
+                string.IsNullOrWhiteSpace(notification.Title) || notification.Title.Length > 60 ||
+                string.IsNullOrWhiteSpace(notification.Message) || notification.Message.Length > 200)
+                throw new InvalidDataException("仅接受当天有效通知");
 
-            var receipt = $"{notification.Date:yyyy-MM-dd}|{notification.Success}";
+            if (!receipts.Contains(notification.Id))
+            {
+                icon.ShowBalloonTip(10000, notification.Title, notification.Message,
+                    notification.Success ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                receipts.Add(notification.Id);
+                Directory.CreateDirectory(Path.GetDirectoryName(receiptPath)!);
+                var temp = receiptPath + ".tmp";
+                File.WriteAllLines(temp, [today.ToString("yyyy-MM-dd"), .. receipts], new UTF8Encoding(false));
+                File.Move(temp, receiptPath, true);
+            }
 
-            if (lastReceipt == receipt)
-                return;
-
-            var text = notification.Success ? "工时填报成功，已核对通过" : "工时填报失败或结果不明，请打开管理页面检查";
-            icon.ShowBalloonTip(10000, "睿科自动化任务", $"{notification.Date:yyyy-MM-dd} {text}",
-                notification.Success ? ToolTipIcon.Info : ToolTipIcon.Warning);
-            lastReceipt = receipt;
-            Directory.CreateDirectory(Path.GetDirectoryName(receiptPath)!);
-            var temp = receiptPath + ".tmp";
-            File.WriteAllText(temp, receipt, new UTF8Encoding(false));
-            File.Move(temp, receiptPath, true);
+            // 展示并记录本用户回执后才确认，服务据此记录托盘接收状态
+            await pipe.WriteAsync(new byte[] { 1 }, deadline.Token);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or JsonException)
         {
             if (!stopping.IsCancellationRequested)
-                icon.Text = "睿科自动化任务：等待服务或通知通道恢复";
+                icon.Text = "自动化任务：等待服务或通知通道恢复";
         }
         finally
         {
@@ -147,7 +149,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         catch (Win32Exception)
         {
-            icon.ShowBalloonTip(10000, "睿科自动化任务", "管理页面未打开，请检查服务目录和打开页面脚本", ToolTipIcon.Warning);
+            icon.ShowBalloonTip(10000, "自动化任务", "管理页面未打开，请检查服务目录和打开页面脚本", ToolTipIcon.Warning);
         }
     }
 

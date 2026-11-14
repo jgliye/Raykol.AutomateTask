@@ -3,19 +3,34 @@ using Raykol.AutomateTask.Models;
 namespace Raykol.AutomateTask.Services;
 
 /// <summary>
-/// 后台任务所需的业务边界，支持隔离外部请求进行状态验证
+/// 单个工时任务的配置读取、CRM 会话和填报约束
 /// </summary>
 public interface IWorkHoursService
 {
+    /// <summary>
+    /// 最近一次实际 CRM 身份检查结果
+    /// </summary>
+    CrmSessionStatus Crm { get; }
+
     /// <summary>
     /// 读取并验证当前工时配置
     /// </summary>
     WorkHoursConfig ReadConfig();
 
     /// <summary>
-    /// 根据重复规则判断当天是否执行
+    /// 只读检查当前 CRM 会话
     /// </summary>
-    Task<bool> ShouldRun(WorkHoursConfig config, DateOnly date, CancellationToken ct);
+    Task<CrmSessionStatus> CheckSession(CancellationToken ct);
+
+    /// <summary>
+    /// 登录 CRM 并返回核实后的本人账号
+    /// </summary>
+    Task<string> Login(string username, string password, WorkHoursConfig config, CancellationToken ct);
+
+    /// <summary>
+    /// 清除 CRM 会话
+    /// </summary>
+    void Logout();
 
     /// <summary>
     /// 只读查询本人当天
